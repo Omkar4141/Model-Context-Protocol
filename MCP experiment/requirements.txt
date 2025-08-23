@@ -1,2 +1,2 @@
-mcp>=0.3.0          # official Python SDK (thin wrapper around the spec)
-httpx               # used by the weather tool
+langchain-ollama 
+langchain-mcp-adapter

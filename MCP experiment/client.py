@@ -1,96 +1,43 @@
-#!/usr/bin/env python3
-"""
-MCP client that uses Ollama (e.g. llama3.1) to decide which tools to call.
-"""
-
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
+from langchain_ollama import ChatOllama
 import asyncio
-import json
-from typing import Any, Dict, List
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
-# ------------- Ollama integration ---------------------------------
-import ollama  # pip install ollama
-
-OLLAMA_MODEL = "llama3.2:3b"          # change to whichever tag you pulled
-OLLAMA_HOST = "http://localhost:11434"   # or your remote Ollama endpoint
-ollama_client = ollama.AsyncClient(host=OLLAMA_HOST)
-
-# ------------------------------------------------------------------
-
-
-async def main() -> None:
-    # 1. Launch the MCP server (same as before)
-    server = StdioServerParameters(
-        command="python",
-        args=["mcp_server.py"],
-        env=None
+async def main():
+    # Set up the multi-server client
+    client = MultiServerMCPClient(
+        {
+            "math": {
+                "command": "python",
+                "args": ["math_server.py"],  # Make sure path is correct
+                "transport": "stdio"
+            },
+            "weather": {
+                "url": "http://127.0.0.1:8000/mcp",  # Make sure weather server is running here
+                "transport": "streamable_http"
+            }
+        }
     )
 
-    async with stdio_client(server) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    # Fetch tools and set up the agent
+    tools = await client.get_tools()
+    model = ChatOllama(model="llama3.2:3b")
+    agent = create_react_agent(model, tools)
 
-            # 2. Describe the tools to the LLM
-            tools_meta = await session.list_tools()
-            openai_style_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.inputSchema,
-                    },
-                }
-                for t in tools_meta
-            ]
+    print("🔁 Chat started! Ask a math or weather question. Type 'exit' to quit.")
 
-            # 3. Simple chat loop
-            messages: List[Dict[str, Any]] = []
-            while True:
-                user = input("\nUser: ").strip()
-                if user.lower() in {"exit", "quit"}:
-                    break
-                messages.append({"role": "user", "content": user})
+    while True:
+        user_input = input("🧑 You: ")
+        if user_input.strip().lower() == "exit":
+            print("👋 Goodbye!")
+            break
 
-                # 4. Ask Ollama
-                resp = await ollama_client.chat(
-                    model=OLLAMA_MODEL,
-                    messages=messages,
-                    tools=openai_style_tools,
-                )
+        response = await agent.ainvoke(
+            {"messages": [{"role": "user", "content": user_input}]}
+        )
 
-                assistant_msg = resp["message"]
-                messages.append(assistant_msg)
+        # Extract and print the last message from the agent
+        final_message = response["messages"][-1].content
+        print("🤖 Agent:", final_message)
+asyncio.run(main())
 
-                # 5. Execute any tool calls
-                if "tool_calls" in assistant_msg:
-                    for tc in assistant_msg["tool_calls"]:
-                        name = tc["function"]["name"]
-                        args = json.loads(tc["function"]["arguments"])
-                        result = await session.call_tool(name, args)
-
-                        # Add the tool result back to history
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "content": str(result),
-                            }
-                        )
-
-                    # 6. Ask Ollama again with the tool results
-                    resp2 = await ollama_client.chat(
-                        model=OLLAMA_MODEL,
-                        messages=messages,
-                    )
-                    final = resp2["message"]["content"]
-                    messages.append({"role": "assistant", "content": final})
-                else:
-                    final = assistant_msg["content"]
-
-                print("Assistant:", final)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
